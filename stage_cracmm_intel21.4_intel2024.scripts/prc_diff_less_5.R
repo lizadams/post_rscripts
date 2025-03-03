@@ -1,0 +1,118 @@
+library(ncdf4)
+source("/proj/ie/proj/CMAS/CMAQ/CMAQv5.5_testing/CMAQ_v5.5/POST/rscripts/M3_functions.r")
+library(fields)
+library(rlang)
+library(viridis)
+library(lattice)
+# Usage: add to batch script, and submit using Rscript prc_diff_less_5.R
+# Developed by Manish Soni 07/17/2024
+
+
+base <- "v5.5"
+base2 <- ""
+base3 <- "v5.4.0.1"
+
+sens.list2 <- c("")
+sens.list3 <- c("")
+sens.list <- c("v5.4.0.1")
+
+infile_1 <- sprintf("/work/users/l/i/lizadams/CMAQ/data/data/CCTM_ACONC_v54_intel21.4_2018_12US1_20171222.nc")
+inf.base <- nc_open(infile_1)
+
+#spc.list <- c("PRES", "O3", "NO2", "ATIJ")
+spc.list <- names(inf.base$var[-1])
+lay.sens.list <- c("layer1_only")
+
+startplotdate <- as.Date("2017-12-22", format="%Y-%m-%d")
+endplotdate <- as.Date("2017-12-23", format="%Y-%m-%d")  # Changed end date for more columns
+
+# Create directories if they don't exist
+#plot_dir <- sprintf("/proj/ie/proj/CMAS/CMAQ/CMAQv5.5/build_sycamore/cmaq_intel/POST/rscripts/stage_cracmm_intel21.4_intel2024.scripts")
+plot_dir <- getwd()
+
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+# Initialize an empty list to store results for each species
+species_results <- list()
+
+# Create a vector of dates for the column headers
+date_seq <- seq(startplotdate, endplotdate, by="day")
+date_headers <- format(date_seq, "%Y-%m-%d")
+
+# Column names with 'spc' and dates
+col_names <- c("spc", date_headers)
+
+path1 <-sprintf("/work/users/l/i/lizadams/CMAQ/data/data/")
+path2  <-sprintf("/work/users/l/i/lizadams/CMAQ/data/data/output_CCTM_v55_intel_STAGE_EM_2018_12US1_two_week_16x8/")
+
+for (lay.sens in lay.sens.list) {
+
+  for (spc in spc.list) {
+
+    # Initialize a vector to collect results for this species
+    spc_results <- c()
+
+    theDate <- startplotdate
+    while (theDate <= endplotdate) {
+      plotdate <- format(theDate, "%Y%m%d")
+
+      # Correctly construct the file paths using sprintf
+      inf.base.file <- sprintf("%s/CCTM_ACONC_v54_intel21.4_2018_12US1_%s.nc", path1, plotdate)
+      inf.sens.file <- sprintf("%s/CCTM_ACONC_v55_intel_STAGE_EM_2018_12US1_two_week_16x8_%s.nc", path2, plotdate)
+
+      # Open the NetCDF files
+      inf.base <- nc_open(inf.base.file)
+      inf.sens <- nc_open(inf.sens.file)
+
+      spc.base <- ncvar_get(inf.base, spc)
+      spc.base.units <- ncatt_get(inf.base, spc, "units")
+      spc.sens <- ncvar_get(inf.sens, spc)
+
+      # Write the CSV file for this species
+      prc_diff_array <- array(NA, dim = c(dim(spc.base)[1], dim(spc.base)[2], 24))
+      for (hour in 1:24) { # Loop for 24 hours
+        for (col in 1:dim(spc.base)[1]) {
+          for (row in 1:dim(spc.base)[2]) {
+            prc_diff_array[col, row, hour] <- ((abs(spc.sens[col, row, hour] - spc.base[col, row, hour])) / ((spc.base[col, row, hour] + spc.sens[col, row, hour]) / 2)) * 100
+          } # row loop
+        } # col loop
+      } # hour loop
+
+      # Compute mean percentage difference for each grid cell
+      mean_prc_diff <- apply(prc_diff_array, c(1, 2), mean, na.rm = TRUE)
+      # Calculate percentage of values where prc_diff < 5%
+      total_cells <- dim(mean_prc_diff)[1] * dim(mean_prc_diff)[2]
+      cells_less_than_5 <- sum(mean_prc_diff < 5, na.rm = TRUE)
+      percentage_less_than_5 <- (cells_less_than_5 / total_cells) * 100
+      #print(paste("Total cells:", total_cells))
+      #print(paste("Cells with mean percentage difference < 5%:", cells_less_than_5))
+      #print(paste("Percentage of cells with mean percentage difference < 5%:", percentage_less_than_5))
+
+      # Append the result to the vector for this species
+      spc_results <- c(spc_results, round(percentage_less_than_5,2))
+
+      # Clean up
+      nc_close(inf.base)
+      nc_close(inf.sens)
+      
+      theDate <- theDate + 1
+      print(theDate)
+    }
+
+    # Combine results for this species into a single data frame row
+    species_results[[spc]] <- data.frame(spc = spc, t(spc_results))
+    print(spc)
+  }
+}
+
+# Combine all species results into a single data frame
+combined_results <- do.call(rbind, species_results)
+
+# Set the column names
+colnames(combined_results) <- col_names
+
+# Write the combined results to the CSV file
+summary_file_path <- sprintf("%s/prc_summary_result.csv", plot_dir)
+write.table(combined_results, file = summary_file_path, row.names = FALSE, quote = FALSE, col.names = TRUE, sep=",")
